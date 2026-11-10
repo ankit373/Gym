@@ -1546,14 +1546,16 @@ async def test_a_stale_restored_agent_session_and_its_live_copy_export_once_and_
 class _AllAtOnce:
     """A gate each deletion waits at until all ``expected`` have started, so overlap is shown without timing.
 
-    A deletion that runs only after an earlier one finished never sees the gate open, and ``overlapped``
-    stays false; the bounded wait keeps that failure from hanging the test.
+    A deletion that can only start after an earlier one finished leaves that earlier one waiting at the gate
+    until its bounded wait gives up, which makes ``overlapped`` false; the bound keeps that failure from
+    hanging the test.
     """
 
     def __init__(self, expected: int) -> None:
         self.expected = expected
         self.started = 0
         self.opened = asyncio.Event()
+        self.gave_up = False
 
     async def arrive(self) -> None:
         self.started += 1
@@ -1562,11 +1564,11 @@ class _AllAtOnce:
         try:
             await asyncio.wait_for(self.opened.wait(), timeout=10)
         except TimeoutError:
-            pass
+            self.gave_up = True
 
     @property
     def overlapped(self) -> bool:
-        return self.opened.is_set()
+        return self.opened.is_set() and not self.gave_up
 
 
 async def test_stale_copies_on_several_workers_are_deleted_at_once(socket_dir: str, tmp_path: Path) -> None:
@@ -1599,6 +1601,7 @@ async def test_stale_copies_on_several_workers_are_deleted_at_once(socket_dir: s
 
     assert len(records(tmp_path / "ckpt2", "agent")) == len(keys)
     # All six deletions, three per worker, were in progress together rather than one after another.
+    # Serial deletion usually fails earlier, when the gate's wait outlasts the checkpoint deadline.
     assert gate.overlapped
 
 
@@ -1640,6 +1643,7 @@ async def test_stale_resources_copies_on_several_workers_are_deleted_at_once(soc
     assert sorted(record["session_id"] for record in exported) == sessions
     assert {record["state"] for record in exported} == {"seeded again"}
     # All six teardowns, three per worker, were in progress together rather than one after another.
+    # Serial teardown usually fails earlier, when the gate's wait outlasts the checkpoint deadline.
     assert gate.overlapped
 
 

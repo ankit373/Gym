@@ -87,6 +87,18 @@ def result(tmp_path, process):
             process.wait()
 
 
+def stop(tmp_path, process):
+    """Stop a supervisor whose test failed before reading its result, so it cannot outlive the test."""
+    if process is None or process.poll() is not None:
+        return
+    (tmp_path / "stop.request").touch()
+    try:
+        process.wait(timeout=CLEANUP_TIMEOUT_SECONDS + 10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def wait_for(path):
     deadline = time.monotonic() + 30
     while not path.exists():
@@ -125,6 +137,7 @@ def test_capture_stdin_and_environment(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
 def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
+    process = None
     try:
         # A completed tool leaves its detached service, which no longer descends from Codex at the stop.
         tool = "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid"
@@ -139,6 +152,7 @@ def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
         pid = int((tmp_path / "child.pid").read_text())
         assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
+        stop(tmp_path, process)
         if (tmp_path / "child.pid").exists():
             try:
                 os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)

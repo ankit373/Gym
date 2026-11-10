@@ -85,6 +85,18 @@ def result(tmp_path, process):
             process.wait()
 
 
+def stop(tmp_path, process):
+    """Stop a supervisor whose test failed before reading its result, so it cannot outlive the test."""
+    if process is None or process.poll() is not None:
+        return
+    (tmp_path / "stop.request").touch()
+    try:
+        process.wait(timeout=CLEANUP_TIMEOUT_SECONDS + 10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 async def test_runner_records_task_directories_before_private_overrides(tmp_path):
     task_home = tmp_path / 'task "home" \\ dir'
     (tmp_path / "task-environment.ready").write_text("ready\n")
@@ -130,6 +142,7 @@ async def test_unset_home_falls_back_to_the_account_home(tmp_path):
 @linux_only
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
 async def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
+    process = None
     try:
         # A completed tool leaves its detached service adopted before close.
         tool = (
@@ -154,6 +167,7 @@ async def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
         pid = int((tmp_path / "child.pid").read_text())
         assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
+        stop(tmp_path, process)
         if (tmp_path / "child.pid").exists():
             try:
                 os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)

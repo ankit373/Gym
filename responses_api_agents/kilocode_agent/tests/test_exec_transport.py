@@ -29,6 +29,9 @@ CLOSE_TIMEOUT = 10
 
 
 class ExecOnlySandbox:
+    # Uploads are local file copies, so a stop request never waits behind a running exec.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.cancelled_launch = False
         self.lost_launch = False
@@ -105,11 +108,11 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
         "pathlib.Path('child.pid').write_text(str(p.pid)); "
         + ("print('{}')" if ending == "natural" else "time.sleep(60)")
     )
-    # Long enough for a loaded runner to start the tool chain before the deadline fires.
-    deadline = 5 if ending == "timeout" else 60
+    # The timeout case expires the activation on purpose once the tool has run, so no deadline races start-up.
+    deadline = 60
     task = state.task = asyncio.create_task(activate(state, code, timeout=deadline))
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "child.pid").exists():
                 await asyncio.sleep(0.01)
         if ending == "cancel":
@@ -120,6 +123,8 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
             await state.close(timeout=CLOSE_TIMEOUT)
             await asyncio.gather(task, return_exceptions=True)
         else:
+            if ending == "timeout":
+                assert await state.session.expire(timeout=CLOSE_TIMEOUT)
             artifacts = await task
             assert artifacts.exit_code == (0 if ending == "natural" else None)
         assert state.session.cleanup["cleanup_confirmed"] is True
@@ -170,7 +175,7 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await activate(state, "open('started','w').close()")
+        await activate(state, "open('started','w').close()", timeout=10)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None

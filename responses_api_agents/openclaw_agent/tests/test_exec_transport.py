@@ -26,6 +26,9 @@ CLOSE_TIMEOUT = 10
 
 
 class ExecOnlySandbox:
+    # Uploads are local file copies, so a stop request never waits behind a running exec.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.cancelled_launch = False
         self.lost_launch = False
@@ -112,8 +115,8 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         "pathlib.Path('ready').touch(); "
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
-    # Long enough for a loaded runner to start the tool chain before the deadline fires.
-    deadline = 5 if ending == "timeout" else 60
+    # The timeout case expires the activation on purpose once the tool has run, so no deadline races start-up.
+    deadline = 60
     task = state.task = asyncio.create_task(
         state.execute(payload(state, code), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
     )
@@ -129,6 +132,8 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
             await state.close(CLOSE_TIMEOUT)
             await asyncio.gather(task, return_exceptions=True)
         else:
+            if ending == "timeout":
+                assert await state.session.expire(timeout=CLOSE_TIMEOUT)
             await task
         assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "natural":
