@@ -112,12 +112,13 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         "pathlib.Path('ready').touch(); "
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
-    deadline = 3 if ending == "timeout" else 60
+    # Long enough for a loaded runner to start the tool chain before the deadline fires.
+    deadline = 5 if ending == "timeout" else 60
     task = state.task = asyncio.create_task(
         state.execute(payload(state, code), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
                 await asyncio.sleep(0.01)
         if ending == "cancel":
@@ -167,7 +168,7 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
         state.execute(payload(state, code), timeout=60, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
                 await asyncio.sleep(0.01)
         supervisor_pid = int((Path(state.session.session_dir) / "supervisor.pid").read_text())
@@ -186,7 +187,7 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=CLOSE_TIMEOUT)
+        await state.execute(payload(state, "open('started','w').close()"), timeout=10, close_timeout=CLOSE_TIMEOUT)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None

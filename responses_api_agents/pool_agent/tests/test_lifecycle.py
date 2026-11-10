@@ -173,7 +173,9 @@ async def test_real_stage_run_collect_close(tmp_path, ending):
     mode = "term" if ending in ("timeout", "close") else ending
     state, sandbox = session(tmp_path, mode)
     await state.install(version="v1.0.16", accept_eula=True, timeout=10)
-    task = asyncio.create_task(execute(state, timeout=2 if ending in ("timeout", "stubborn") else 20))
+    # The deadline must outlast the runner, its proxy and the fake Pool starting up and installing the TERM
+    # handler, which takes well under a second unloaded but several on a busy runner.
+    task = asyncio.create_task(execute(state, timeout=8 if ending in ("timeout", "stubborn") else 20))
     try:
         if ending == "close":
             async with asyncio.timeout(10):

@@ -210,6 +210,16 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
         await environment.exec("tmux kill-server")
 
 
+async def eventually(read, done, *, timeout: float = 30):
+    """Poll ``read`` until ``done`` accepts its value or ``timeout`` passes; return whether it did."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not done(await read()):
+        if asyncio.get_running_loop().time() > deadline:
+            return False
+        await asyncio.sleep(0.1)
+    return True
+
+
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("queued_commands", [160, 16384])
@@ -248,16 +258,20 @@ async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_
         await terminal.send_keys(f"touch {marker}\n" * queued_commands, min_timeout_sec=0.3)
         # Unpatched tmux queues Ctrl-C after the paste and leaves sleep running.
         await environment.exec("tmux send-keys -t test C-c")
-        await asyncio.sleep(0.2)
-        before = await environment.exec("tmux display-message -p -t test '#{pane_current_command}'")
-        assert before.stdout.strip() == "sleep"
+
+        async def current_command() -> str:
+            shown = await environment.exec("tmux display-message -p -t test '#{pane_current_command}'")
+            return shown.stdout.strip()
+
+        # Polled rather than slept on, so a slow runner cannot read the pane before the shell has caught up.
+        assert await eventually(current_command, lambda command: command == "sleep")
         await terminal.send_keys("C-c\n", min_timeout_sec=0.3)
         await terminal.send_keys("echo TERMINAL_RECOVERED\n", min_timeout_sec=0.3)
-        assert "\nTERMINAL_RECOVERED\n" in await terminal.capture_pane()
+        assert await eventually(terminal.capture_pane, lambda pane: "\nTERMINAL_RECOVERED\n" in pane)
         assert not marker.exists()
         await terminal.send_keys("stty -echo -icanon -isig; head -c 4 | od -An -tx1; stty sane\n", min_timeout_sec=0.3)
         await terminal.send_keys(["xy", "C-c", "z"], min_timeout_sec=0.3)
-        assert "78 79 03 7a" in await terminal.capture_pane()
+        assert await eventually(terminal.capture_pane, lambda pane: "78 79 03 7a" in pane)
     finally:
         await environment.exec("tmux kill-server")
 

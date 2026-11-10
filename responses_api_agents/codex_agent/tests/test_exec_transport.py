@@ -22,6 +22,10 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "linux" or shutil.which("node") is None, reason="Linux process supervision and Node required"
 )
 
+# These integration tests run real shells and scan /proc on shared CI runners.
+# Tight cancellation deadlines are covered separately by the SandboxSession unit tests.
+CLOSE_TIMEOUT = 10
+
 
 class ExecOnlySandbox:
     def __init__(self):
@@ -113,12 +117,13 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         "pathlib.Path('ready').touch(); "
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
-    deadline = 0.5 if ending == "timeout" else 60
+    # Long enough for a loaded runner to start the tool chain before the deadline fires.
+    deadline = 5 if ending == "timeout" else 60
     task = state.task = asyncio.create_task(
-        state.execute(payload(state, code, timeout=deadline), timeout=deadline, close_timeout=3)
+        state.execute(payload(state, code, timeout=deadline), timeout=deadline, close_timeout=CLOSE_TIMEOUT)
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "ready").exists():
                 await asyncio.sleep(0.01)
         if ending == "cancel":
@@ -126,7 +131,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
             with pytest.raises(asyncio.CancelledError):
                 await task
         elif ending == "close":
-            await state.close(3)
+            await state.close(CLOSE_TIMEOUT)
             await asyncio.gather(task, return_exceptions=True)
         else:
             await task
@@ -136,9 +141,9 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         child_pid = int((workdir / "child.pid").read_text())
         assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
         assert provider.cancelled_launch is False
-        assert provider.deadline == pytest.approx(deadline + 3 + 30)
-        await state.close(3)
-        await state.close(3)
+        assert provider.deadline == pytest.approx(deadline + CLOSE_TIMEOUT + 30)
+        await state.close(CLOSE_TIMEOUT)
+        await state.close(CLOSE_TIMEOUT)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
         # Agent close releases its session; Resources owns descendant teardown.
@@ -146,7 +151,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
     finally:
         try:
             if not state.session.closed:
-                await state.close(3)
+                await state.close(CLOSE_TIMEOUT)
         finally:
             if (workdir / "child.pid").exists():
                 try:
@@ -159,10 +164,10 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=3)
+        await state.execute(payload(state, "open('started','w').close()"), timeout=10, close_timeout=CLOSE_TIMEOUT)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.runtime_info is None  # No worker ran after the failed launch.
-    await state.close(3)
+    await state.close(CLOSE_TIMEOUT)
     provider.lost_launch = False
     await provider.exec(provider.delayed_command, cwd=str(workdir))
     assert not (workdir / "started").exists()
@@ -180,7 +185,7 @@ async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    await state.close(3)
+    await state.close(CLOSE_TIMEOUT)
     assert provider.disconnected
     assert state.session.closed
     assert state.session.cleanup is None
